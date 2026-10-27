@@ -38,9 +38,9 @@
     margin-bottom: 14px;
   }
   .stats { display: flex; gap: 8px; margin-bottom: 14px; }
-  .stat { flex: 1; background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 10px 8px; text-align: center; }
-  .stat b { display: block; font-size: 18px; font-variant-numeric: tabular-nums; }
-  .stat span { color: var(--muted); font-size: 11.5px; }
+  .stat { flex: 1; background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 10px 6px; text-align: center; }
+  .stat b { display: block; font-size: 17px; font-variant-numeric: tabular-nums; }
+  .stat span { color: var(--muted); font-size: 11px; }
   label.field { display: block; color: var(--muted); font-size: 12.5px; margin-bottom: 6px; }
   input, select, button, textarea { font: inherit; color: inherit; }
   input[type="date"], input[type="text"], input[type="number"], select, textarea {
@@ -79,7 +79,7 @@
   .hint b { color: var(--accent); font-weight: 600; }
   .sets { display: flex; flex-direction: column; gap: 6px; }
   .set-row { display: flex; gap: 6px; align-items: center; }
-  .set-row .idx { color: var(--muted); font-size: 12px; width: 26px; text-align: right; font-variant-numeric: tabular-nums; }
+  .set-row .idx { color: var(--muted); font-size: 12px; width: 38px; flex: 0 0 38px; text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
   .set-row input { text-align: center; }
   .unit { color: var(--muted); font-size: 12px; width: 14px; }
   .sets-empty { color: var(--muted); font-size: 12.5px; padding: 4px 0; }
@@ -95,6 +95,13 @@
   .pr { color: var(--muted); font-size: 12.5px; margin-top: 8px; }
   .pr b { color: var(--accent); }
   .demo-banner { background: #2a2312; border: 1px solid #4a3c1a; color: #f5c96b; font-size: 12.5px; border-radius: 10px; padding: 8px 10px; margin-bottom: 14px; }
+  /* 分段控件：kg / lb 切换 */
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 9px; overflow: hidden; }
+  .seg button { border: 0; border-radius: 0; padding: 4px 11px; font-size: 12.5px; background: transparent; color: var(--muted); }
+  .seg button.on { background: var(--accent); color: #06240f; font-weight: 600; }
+  .card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 10px; }
+  .card-head h2 { margin: 0; }
+  .unit-btn { min-width: 40px; color: var(--accent); border-color: #2c4736; }
 </style>
 </head>
 <body>
@@ -110,11 +117,15 @@
     <div class="stat"><b id="stat-sessions">0</b><span>训练次数</span></div>
     <div class="stat"><b id="stat-volume">0</b><span>总容量 kg</span></div>
     <div class="stat"><b id="stat-exercises">0</b><span>练过动作</span></div>
+    <div class="stat"><b id="stat-calories">0</b><span>消耗 kcal</span></div>
   </div>
 
   <!-- 记录一次训练 -->
   <section class="card">
-    <h2>今天练了</h2>
+    <div class="card-head">
+      <h2>今天练了</h2>
+      <div class="seg" id="unit-switch" role="group" aria-label="默认重量单位"></div>
+    </div>
     <label class="field" for="date">日期</label>
     <input type="date" id="date" />
     <div id="entries" style="margin-top: 14px;"></div>
@@ -132,6 +143,19 @@
     <input type="text" id="note" placeholder="比如 状态不错 / 手腕有点紧" />
 
     <button id="save" class="primary" style="width: 100%; margin-top: 14px; padding: 12px;">保存这次训练</button>
+  </section>
+
+  <!-- 体重 -->
+  <section class="card">
+    <h2>体重</h2>
+    <div class="row">
+      <input type="date" id="weight-date" class="grow" aria-label="体重日期" />
+      <input type="number" id="weight-kg" class="grow" inputmode="decimal" step="0.1" min="0" placeholder="kg" aria-label="体重公斤" />
+      <button id="save-weight" class="mini">保存</button>
+    </div>
+    <div class="pr" id="weight-stats" style="margin-top: 10px;"></div>
+    <canvas id="weight-chart" width="520" height="130"></canvas>
+    <div id="weight-list" style="margin-top: 8px;"></div>
   </section>
 
   <!-- 进步曲线 -->

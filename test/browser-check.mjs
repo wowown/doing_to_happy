@@ -110,9 +110,10 @@ const INTERACTION = `
   inputs[1].dispatchEvent(new Event('input', { bubbles: true }));
 
   // 3. 再加两组，验证「同名动作合并 + 多组累加」
-  document.querySelector('#entries .entry button.mini').click();
+  //    注意选 .ghost：单位按钮也是 .mini，用 .mini 会点到它而不是「+ 一组」
+  document.querySelector('#entries .entry button.ghost').click();
   await wait();
-  document.querySelector('#entries .entry button.mini').click();
+  document.querySelector('#entries .entry button.ghost').click();
   await wait();
   const allRows = document.querySelectorAll('#entries .set-row');
   [[1, '60', '6'], [2, '60', '5']].forEach(([i, w, r]) => {
@@ -134,7 +135,49 @@ const INTERACTION = `
   document.getElementById('save').click();
   await wait();
 
+  // 6. 记体重，同一天连续存两次，验证「覆盖而不是堆两条」
+  document.getElementById('weight-date').value = '2026-02-11';
+  const wKg = document.getElementById('weight-kg');
+  wKg.value = '72.4';
+  wKg.dispatchEvent(new Event('input', { bubbles: true }));
+  document.getElementById('save-weight').click();
+  await wait();
+  wKg.value = '72.1';
+  wKg.dispatchEvent(new Event('input', { bubbles: true }));
+  document.getElementById('save-weight').click();
+  await wait();
+
+  // 7. 切到磅，用磅记一台器械（111 lb），验证「原样保存、不被改写成 kg」
+  document.querySelectorAll('#unit-switch button')[1].click(); // lb
+  await wait();
+  const custom = document.getElementById('custom-exercise');
+  custom.value = '坐姿划船';
+  document.getElementById('add-custom').click();
+  await wait();
+  const lastEntry = [...document.querySelectorAll('#entries .entry')].pop();
+  const rowInputs = lastEntry.querySelector('.set-row').querySelectorAll('input');
+  rowInputs[0].value = '111'; rowInputs[0].dispatchEvent(new Event('input', { bubbles: true }));
+  rowInputs[1].value = '10'; rowInputs[1].dispatchEvent(new Event('input', { bubbles: true }));
+  const rowUnitLabel = lastEntry.querySelector('.unit-btn').textContent;
+
+  // 8. 单组单位按钮：点一下应从 lb 换成 kg，数字跟着换算（111 lb → 50.3）
+  lastEntry.querySelector('.unit-btn').click();
+  await wait();
+  const afterToggleUnit = document.querySelector('#entries .entry:last-child .unit-btn').textContent;
+  const afterToggleWeight = document.querySelector('#entries .entry:last-child .set-row input').value;
+
+  // 再切回磅，保证存进去的是磅；同时记录数值，验证来回切换不漂移
+  document.querySelector('#entries .entry:last-child .unit-btn').click();
+  await wait();
+  const weightAfterToggleBack = document.querySelector('#entries .entry:last-child .set-row input').value;
+  document.getElementById('save').click();
+  await wait();
+
   const stored = JSON.parse(localStorage.getItem('fitness-tracker-v1') || '[]');
+  const storedWeights = JSON.parse(localStorage.getItem('fitness-tracker-weight-v1') || '[]');
+  const lbSession = stored.find(s => s.entries.some(e => e.name === '坐姿划船'));
+  const lbSet = lbSession ? lbSession.entries.find(e => e.name === '坐姿划船').sets[0] : null;
+
   return {
     errors,
     blockedDialog: null,
@@ -146,6 +189,20 @@ const INTERACTION = `
     storedCount: stored.length,
     storedVolume: stored[0] ? stored[0].entries.reduce((s, e) => s + e.sets.reduce((a, st) => a + st.weight * st.reps, 0), 0) : 0,
     lastHint: document.querySelector('#entries .hint')?.textContent.trim() || '',
+    weightStats: document.getElementById('weight-stats').textContent.trim(),
+    weightRows: document.querySelectorAll('#weight-list .hist-top').length,
+    storedWeightCount: storedWeights.length,
+    storedWeightKg: storedWeights[0] ? storedWeights[0].kg : null,
+    weightInputCleared: document.getElementById('weight-kg').value === '',
+    rowUnitLabel,
+    afterToggleUnit,
+    afterToggleWeight,
+    weightAfterToggleBack,
+    lbStored: lbSet ? { weight: lbSet.weight, unit: lbSet.unit } : null,
+    lbHistoryText: lbSession ? [...document.querySelectorAll('#history .hist-body')].map(n => n.textContent).find(t => t.includes('坐姿划船')) : null,
+    unitPrefPersisted: localStorage.getItem('fitness-tracker-unit-v1'),
+    statCalories: document.getElementById('stat-calories').textContent,
+    firstSessionKcalNote: document.querySelector('#history .hist-item:last-child .hist-note')?.textContent || '',
   };
 })()
 `;
@@ -154,11 +211,17 @@ const INTERACTION = `
 const RELOAD_CHECK = `
 (() => {
   const stored = JSON.parse(localStorage.getItem('fitness-tracker-v1') || '[]');
+  const storedWeights = JSON.parse(localStorage.getItem('fitness-tracker-weight-v1') || '[]');
   return {
     storedCount: stored.length,
+    storedWeightCount: storedWeights.length,
     historyItems: document.querySelectorAll('#history .hist-item').length,
     statSessions: document.getElementById('stat-sessions').textContent,
     prText: document.getElementById('pr').textContent.trim(),
+    weightStats: document.getElementById('weight-stats').textContent.trim(),
+    lbSurvived: JSON.stringify(stored).includes('"unit":"lb"'),
+    unitPrefSurvived: localStorage.getItem('fitness-tracker-unit-v1'),
+    statCalories: document.getElementById('stat-calories').textContent,
     chartPixels: (() => {
       const c = document.getElementById('chart');
       const g = c.getContext('2d');
@@ -166,6 +229,14 @@ const RELOAD_CHECK = `
       let painted = 0;
       for (let i = 3; i < data.length; i += 4) if (data[i] > 0) painted++;
       return painted; // 0 说明曲线没画出来
+    })(),
+    weightChartPixels: (() => {
+      const c = document.getElementById('weight-chart');
+      const g = c.getContext('2d');
+      const data = g.getImageData(0, 0, c.width, c.height).data;
+      let painted = 0;
+      for (let i = 3; i < data.length; i += 4) if (data[i] > 0) painted++;
+      return painted;
     })(),
   };
 })()
@@ -233,6 +304,42 @@ async function main() {
     const reload = await cdp.send("Runtime.evaluate", { expression: RELOAD_CHECK, returnByValue: true });
     report.afterReload = reload.result.value;
     report.steps.push("刷新后数据检查完成");
+
+    // 截图：正在填写的一组，混用 kg 和 lb（这是单位功能最该被看见的样子）
+    await cdp.send("Page.navigate", { url: `http://127.0.0.1:${HTTP_PORT}/index.html` });
+    await new Promise((r) => setTimeout(r, 900));
+    const draft = await cdp.send("Runtime.evaluate", {
+      expression: `(async () => {
+        const wait = () => new Promise(r => setTimeout(r, 80));
+        document.querySelectorAll('#unit-switch button')[1].click(); // 默认 lb
+        await wait();
+        document.getElementById('exercise-select').value = '卧推';
+        document.getElementById('add-exercise').click();
+        await wait();
+        document.querySelector('#entries .entry button.ghost').click(); // 第二组
+        await wait();
+        const rows = [...document.querySelectorAll('#entries .set-row')];
+        [['111', '10'], ['111', '8']].forEach(([w, r], i) => {
+          const ins = rows[i].querySelectorAll('input');
+          ins[0].value = w; ins[0].dispatchEvent(new Event('input', { bubbles: true }));
+          ins[1].value = r; ins[1].dispatchEvent(new Event('input', { bubbles: true }));
+        });
+        rows[1].querySelector('.unit-btn').click(); // 第二组切回 kg，演示混用
+        await wait();
+        return {
+          units: [...document.querySelectorAll('#entries .unit-btn')].map(b => b.textContent),
+          weights: [...document.querySelectorAll('#entries .set-row')].map(r => r.querySelectorAll('input')[0].value),
+          setCount: document.querySelectorAll('#entries .set-row').length,
+        };
+      })()`,
+      awaitPromise: true,
+      returnByValue: true,
+    });
+    report.draftMixedUnits = draft.result.value;
+    report.steps.push("混合单位填写状态检查完成");
+    const shot3 = await cdp.send("Page.captureScreenshot", { format: "png", captureBeyondViewport: true });
+    await fs.writeFile(path.join(OUT_DIR, "draft-units.png"), Buffer.from(shot3.data, "base64"));
+    report.screenshots.push("shot/draft-units.png");
 
     // 示例模式截图（看曲线长什么样）
     await cdp.send("Page.navigate", { url: `http://127.0.0.1:${HTTP_PORT}/index.html?demo=1` });
