@@ -21,7 +21,16 @@ var FitnessLogic = (function () {
     "高位下拉",
     "腿举",
     "二头弯举",
-    "三头肌绳索下拉"
+    "三头肌绳索下拉",
+    "夹胸",
+    "史密斯上斜推胸",
+    "坐姿推胸",
+    "哑铃推肩",
+    "三头臂屈伸",
+    "哑铃前平举",
+    "哑铃侧平举",
+    "蝴蝶机后肩后束",
+    "胯内夹",
   ];
 
   var STORAGE_KEY = "fitness-tracker-v1";
@@ -320,35 +329,100 @@ var FitnessLogic = (function () {
   /*
    * 用 MET（代谢当量）估算，公式：kcal = MET × 体重(kg) × 时长(小时)。
    *
-   * MET 取值参考《体力活动纲要》(Compendium of Physical Activities) 的抗阻训练条目：
-   * 轻中强度约 3.5，高强度约 6.0。按动作分三档是工程上的近似，不是生理学精确值：
-   *   - 大肌群复合动作（卧推/深蹲/硬拉/划船）6.0
-   *   - 半复合或器械主导（推举/腿举/高位下拉）4.0–5.0
-   *   - 孤立小肌群（弯举/臂屈伸）3.5
-   * 真实误差常在 ±30% 以上，所以界面上一律标「约」。
+   * MET 怎么取：按「单组重量 ÷ 体重」这一相对负荷分档。
+   * 《体力活动纲要》把抗阻训练分成轻 3.5 / 中 5.0 / 强 6.0 三档，
+   * 实践里判断轻中强看的就是这一组的重量相对自身体重有多重：
    *
-   * 时长按每组 2 分钟（含组间休息）。这个假设写死是有意的：
-   * 让用户每组填时长，记录成本会翻倍，而 D11 明确说了不追求精准。
+   *   相对负荷 < 0.3        → 3.5（轻）
+   *   0.3 ≤ 相对负荷 < 0.6  → 5.0（中）
+   *   相对负荷 ≥ 0.6        → 6.0（强）
+   *
+   * 为什么不直接算「把杠铃举起来做了多少功」：那个物理量小得离谱。
+   * 卧推 60kg×12 的机械功约 0.9 kcal，而一组的总消耗约 14 kcal，
+   * 真正「举铁」只占 5% 左右，用机械功当指标会让重量几乎不影响结果。
+   * 相对负荷分档不是精确物理，但它是有依据的强度判断，且能反映重量差异。
+   *
+   * 自重动作（重量 0）没法用相对负荷，退回到按动作类型给的固定 MET：
+   * 复合 8.0（纲要里「自重高强度」一档）、半复合 5.0、孤立 3.5。
+   *
+   * 时长按每组 2 分钟（含组间休息）。写死是有意的：让用户每组填时长，
+   * 记录成本会翻倍，而 D11 明确说了不追求精准。误差常在 ±30%，界面一律标「≈」。
    */
-  var MET_TABLE = {
-    卧推: 6.0,
-    深蹲: 6.0,
-    硬拉: 6.0,
-    杠铃划船: 6.0,
-    站姿推举: 5.0,
-    腿举: 5.0,
-    高位下拉: 4.0,
-    二头弯举: 3.5,
-    三头肌绳索下拉: 3.5,
+
+  /** 动作类型：复合（多关节大肌群）/ 半复合（器械主导）/ 孤立（单关节）。 */
+  var EXERCISE_TYPE = {
+    卧推: "compound",
+    深蹲: "compound",
+    硬拉: "compound",
+    杠铃划船: "compound",
+    史密斯上斜推胸: "compound",
+    坐姿推胸: "compound",
+    站姿推举: "half",
+    腿举: "half",
+    高位下拉: "half",
+    哑铃推肩: "half",
+    二头弯举: "isolation",
+    三头肌绳索下拉: "isolation",
+    夹胸: "isolation",
+    三头臂屈伸: "isolation",
+    哑铃前平举: "isolation",
+    哑铃侧平举: "isolation",
+    蝴蝶机后肩后束: "isolation",
+    胯内夹: "isolation",
   };
+  /** 各类型的名义 MET（不吃重量时用，也用来在界面上说明「这动作算几档」）。 */
+  var TYPE_MET = { compound: 6.0, half: 5.0, isolation: 3.5 };
+  /** 自重动作按类型取 MET：复合动作自重强度明显更高。 */
+  var BODYWEIGHT_MET = { compound: 8.0, half: 5.0, isolation: 3.5 };
+  /** 相对负荷分档（单组重量 ÷ 体重）。 */
+  var LOAD_TIERS = [
+    { limit: 0.3, met: 3.5, label: "轻" },
+    { limit: 0.6, met: 5.0, label: "中" },
+    { limit: Infinity, met: 6.0, label: "强" },
+  ];
   var DEFAULT_MET = 5.0;
   var SECONDS_PER_SET = 120;
   /** 没有体重记录时的兜底体重。用它算出来的数要看得出是估的。 */
   var DEFAULT_BODY_KG = 70;
+  var DEFAULT_BODYWEIGHT_MET = 5.0;
 
-  /** 动作对应的 MET，没收录的按 5.0（中等强度）算。 */
+  /** 动作类型，没收录的按「半复合」处理（中等强度，不夸大也不贬低）。 */
+  function exerciseType(name) {
+    return Object.prototype.hasOwnProperty.call(EXERCISE_TYPE, name) ? EXERCISE_TYPE[name] : "half";
+  }
+
+  /** 动作的名义 MET（不看重量），用于展示和说明。 */
   function metForExercise(name) {
-    return Object.prototype.hasOwnProperty.call(MET_TABLE, name) ? MET_TABLE[name] : DEFAULT_MET;
+    var type = exerciseType(name);
+    return Object.prototype.hasOwnProperty.call(TYPE_MET, type) ? TYPE_MET[type] : DEFAULT_MET;
+  }
+
+  /** 单组的相对负荷 = 这组换算成 kg 的重量 ÷ 体重。体重无效时返回 null。 */
+  function relativeLoad(set, bodyKg) {
+    if (!bodyKg || bodyKg <= 0) return null;
+    return setToKg(set) / bodyKg;
+  }
+
+  /** 单组落在哪一档：{ met, label }。 */
+  function loadTier(set, bodyKg) {
+    var ratio = relativeLoad(set, bodyKg);
+    if (ratio === null) return { met: DEFAULT_MET, label: "中" };
+    for (var i = 0; i < LOAD_TIERS.length; i++) {
+      if (ratio < LOAD_TIERS[i].limit) return { met: LOAD_TIERS[i].met, label: LOAD_TIERS[i].label };
+    }
+    return { met: DEFAULT_MET, label: "中" };
+  }
+
+  /**
+   * 单组的 MET。重量为 0（自重动作）或体重信息不可用时，
+   * 退回按动作类型给的固定值——否则自重的引体向上会被判成「轻」。
+   */
+  function metForSet(set, bodyKg, name) {
+    if (setToKg(set) === 0 || relativeLoad(set, bodyKg) === null) {
+      var type = exerciseType(name);
+      return Object.prototype.hasOwnProperty.call(BODYWEIGHT_MET, type) ? BODYWEIGHT_MET[type] : DEFAULT_BODYWEIGHT_MET;
+    }
+    return loadTier(set, bodyKg).met;
   }
 
   /**
@@ -367,13 +441,21 @@ var FitnessLogic = (function () {
     return candidate.kg;
   }
 
-  /** 一个动作的热量估算（kcal，取整）。bodyKg 缺省时按 70kg 兜底。 */
-  function caloriesForEntry(entry, bodyKg) {
-    if (!entry || !Array.isArray(entry.sets) || entry.sets.length === 0) return 0;
+  /** 逐组的估算热量（kcal，取整），顺序与 sets 一致。 */
+  function caloriesPerSet(entry, bodyKg) {
+    if (!entry || !Array.isArray(entry.sets)) return [];
     var kg = bodyKg === null || bodyKg === undefined ? DEFAULT_BODY_KG : bodyKg;
-    var met = metForExercise(entry.name);
-    var kcal = met * kg * (SECONDS_PER_SET / 3600) * entry.sets.length;
-    return Math.round(kcal);
+    return entry.sets.map(function (set) {
+      var met = metForSet(set, kg, entry.name);
+      return Math.round(met * kg * (SECONDS_PER_SET / 3600));
+    });
+  }
+
+  /** 一个动作的热量估算（kcal）：逐组相加，所以放 20kg 和 60kg 会算出不同的数。 */
+  function caloriesForEntry(entry, bodyKg) {
+    return caloriesPerSet(entry, bodyKg).reduce(function (sum, kcal) {
+      return sum + kcal;
+    }, 0);
   }
 
   /** 整次训练的热量估算（kcal）。 */
@@ -384,8 +466,216 @@ var FitnessLogic = (function () {
     }, 0);
   }
 
+  // ---------- 按天汇总 ----------
+
+  /**
+   * 日期加减天数，返回 YYYY-MM-DD。
+   * 用本地时间构造，不用 new Date("YYYY-MM-DD")：那会被当成 UTC，东八区的晚上会退回前一天。
+   */
+  function addDays(date, delta) {
+    var parts = String(date).split("-");
+    var d = new Date(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2]));
+    d.setDate(d.getDate() + delta);
+    var m = String(d.getMonth() + 1).padStart(2, "0");
+    var day = String(d.getDate()).padStart(2, "0");
+    return d.getFullYear() + "-" + m + "-" + day;
+  }
+
+  /** 某一天的训练记录（可能有多条：上午练胸、晚上练背）。 */
+  function sessionsOn(sessions, date) {
+    return sessions.filter(function (session) {
+      return session.date === date;
+    });
+  }
+
+  // ---------- 有氧记录 ----------
+  /*
+   * 有氧和力量训练是两套数据结构，故意分开存（第三个独立存储键）：
+   * 有氧没有「组 × 重量 × 次数」，只有「类型 + 时长 + 强度（+ 距离）」。
+   * 硬塞进训练记录里，等于让每次读写都要先判断这条记录属于哪种，越用越脏。
+   *
+   * 热量同样用 MET：kcal = MET × 强度系数 × 体重kg × 时长(小时)。
+   * MET 取《体力活动纲要》里对应项目的常见值（见 CARDIO_TYPES 的注释）。
+   * 强度只是对 MET 的粗调（0.8 / 1.0 / 1.25），因为纲要本身就是按速度/强度分档的。
+   */
+
+  /** 有氧项目。met 是「中等强度」的基准值，hasDistance 决定界面上要不要露出距离输入。 */
+  var CARDIO_TYPES = [
+    { name: "跑步", met: 8.3, hasDistance: true },   // 纲要：8 km/h 跑步 8.3
+    { name: "快走", met: 4.3, hasDistance: true },   // 5.6 km/h 快走 4.3
+    { name: "骑车", met: 6.8, hasDistance: true },   // 中速 16–19 km/h 6.8
+    { name: "游泳", met: 5.8, hasDistance: true },   // 自由泳中等 5.8
+    { name: "划船机", met: 7.0, hasDistance: true }, // 中等阻力 7.0
+    { name: "椭圆机", met: 5.0, hasDistance: false },
+    { name: "跳绳", met: 11.8, hasDistance: false }, // 中等速度 11.8
+  ];
+
+  /** 强度系数：对 MET 的粗调，不精确。 */
+  var CARDIO_INTENSITY = [
+    { key: "低", factor: 0.8 },
+    { key: "中", factor: 1.0 },
+    { key: "高", factor: 1.25 },
+  ];
+
+  var CARDIO_STORAGE_KEY = "fitness-tracker-cardio-v1";
+
+  function cardioTypeInfo(name) {
+    for (var i = 0; i < CARDIO_TYPES.length; i++) {
+      if (CARDIO_TYPES[i].name === name) return CARDIO_TYPES[i];
+    }
+    return null;
+  }
+
+  function cardioIntensityFactor(key) {
+    for (var i = 0; i < CARDIO_INTENSITY.length; i++) {
+      if (CARDIO_INTENSITY[i].key === key) return CARDIO_INTENSITY[i].factor;
+    }
+    return 1.0;
+  }
+
+  /** 清洗一条有氧记录，返回 null 表示不合法。 */
+  function normalizeCardioEntry(raw) {
+    if (!raw) return null;
+    var date = typeof raw.date === "string" ? raw.date.trim() : "";
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return null;
+    if (!cardioTypeInfo(raw.type)) return null;
+    var minutes = toNumber(raw.minutes);
+    if (minutes === null || minutes <= 0 || minutes > 600) return null;
+    var intensity = "中";
+    for (var i = 0; i < CARDIO_INTENSITY.length; i++) {
+      if (CARDIO_INTENSITY[i].key === raw.intensity) intensity = raw.intensity;
+    }
+    var distanceKm = toNumber(raw.distanceKm);
+    if (distanceKm !== null && (distanceKm <= 0 || distanceKm > 500)) distanceKm = null;
+    return {
+      date: date,
+      type: raw.type,
+      minutes: Math.round(minutes),
+      intensity: intensity,
+      distanceKm: distanceKm,
+    };
+  }
+
+  /** 一条有氧的热量估算（kcal）。bodyKg 缺省按 70kg 兜底。 */
+  function caloriesForCardio(entry, bodyKg) {
+    if (!entry) return 0;
+    var info = cardioTypeInfo(entry.type);
+    if (!info) return 0;
+    var kg = bodyKg === null || bodyKg === undefined ? DEFAULT_BODY_KG : bodyKg;
+    var met = info.met * cardioIntensityFactor(entry.intensity);
+    return Math.round(met * kg * (entry.minutes / 60));
+  }
+
+  /** 某一天的有氧记录。 */
+  function cardioOn(cardio, date) {
+    return (cardio || []).filter(function (item) {
+      return item.date === date;
+    });
+  }
+
+  /** 某一天有氧的总热量。 */
+  function cardioCaloriesOn(cardio, weights, date) {
+    var bodyKg = bodyKgOn(weights, date);
+    return cardioOn(cardio, date).reduce(function (sum, entry) {
+      return sum + caloriesForCardio(entry, bodyKg);
+    }, 0);
+  }
+
+  /** 有氧记录的展示文案，例如「跑步 30 分钟（中）· 5.2km」。 */
+  function formatCardio(entry) {
+    var text = entry.type + " " + entry.minutes + " 分钟（" + entry.intensity + "）";
+    if (entry.distanceKm) text += "· " + fmtNumber(entry.distanceKm) + "km";
+    return text;
+  }
+
+  /**
+   * 一天的完整快照：练了什么、多少容量、多少热量、当天体重、有氧做了什么。
+   *
+   * bodyKg 和 bodyKgUsed 必须分开：
+   *   - bodyKg     = 这一天自己记的体重；没记就是 null（界面显示「未记录」）
+   *   - bodyKgUsed = 算热量实际用的体重（这一天或之前最近一次），可能来自更早的日期
+   * 混用这两个，会让「这天没称体重」被悄悄填上一个别的日子的数字。
+   *
+   * 热量分三项返回：力量、有氧、合计。合成一个总数会让人以为有氧白练了。
+   */
+  function dayView(sessions, weights, date, cardio) {
+    var todays = sessionsOn(sessions, date);
+    var weightEntries = (weights || []).filter(function (item) {
+      return item.date === date;
+    });
+    var bodyKg = weightEntries.length > 0 ? weightEntries[0].kg : null;
+    var bodyKgUsed = bodyKgOn(weights, date);
+    var todaysCardio = cardioOn(cardio, date);
+
+    var exercises = [];
+    todays.forEach(function (session) {
+      session.entries.forEach(function (entry) {
+        exercises.push({
+          name: entry.name,
+          sets: entry.sets,
+          kcal: caloriesForEntry(entry, bodyKgUsed),
+          sessionId: session.id,
+        });
+      });
+    });
+
+    var strengthCalories = todays.reduce(function (sum, session) {
+      return sum + caloriesForSession(session, bodyKgUsed);
+    }, 0);
+    var cardioCalories = todaysCardio.reduce(function (sum, entry) {
+      return sum + caloriesForCardio(entry, bodyKgUsed);
+    }, 0);
+
+    return {
+      date: date,
+      sessions: todays,
+      exercises: exercises,
+      cardio: todaysCardio,
+      volumeKg: Math.round(
+        todays.reduce(function (sum, session) {
+          return sum + sessionVolume(session);
+        }, 0)
+      ),
+      strengthCalories: strengthCalories,
+      cardioCalories: cardioCalories,
+      calories: strengthCalories + cardioCalories,
+      bodyKg: bodyKg,
+      bodyKgUsed: bodyKgUsed,
+      hasData: todays.length > 0 || weightEntries.length > 0 || todaysCardio.length > 0,
+    };
+  }
+
+  /** 有数据的所有日期，倒序（新的在前）。只有体重或有氧的日期也算。 */
+  function dayList(sessions, weights, cardio) {
+    var seen = {};
+    sessions.forEach(function (session) {
+      seen[session.date] = true;
+    });
+    (weights || []).forEach(function (item) {
+      seen[item.date] = true;
+    });
+    (cardio || []).forEach(function (item) {
+      seen[item.date] = true;
+    });
+    return Object.keys(seen).sort().reverse();
+  }
+
   return {
     DEFAULT_EXERCISES: DEFAULT_EXERCISES,
+    addDays: addDays,
+    sessionsOn: sessionsOn,
+    dayView: dayView,
+    dayList: dayList,
+    CARDIO_TYPES: CARDIO_TYPES,
+    CARDIO_INTENSITY: CARDIO_INTENSITY,
+    CARDIO_STORAGE_KEY: CARDIO_STORAGE_KEY,
+    cardioTypeInfo: cardioTypeInfo,
+    cardioIntensityFactor: cardioIntensityFactor,
+    normalizeCardioEntry: normalizeCardioEntry,
+    caloriesForCardio: caloriesForCardio,
+    cardioOn: cardioOn,
+    cardioCaloriesOn: cardioCaloriesOn,
+    formatCardio: formatCardio,
     STORAGE_KEY: STORAGE_KEY,
     WEIGHT_STORAGE_KEY: WEIGHT_STORAGE_KEY,
     UNIT_STORAGE_KEY: UNIT_STORAGE_KEY,
@@ -394,11 +684,20 @@ var FitnessLogic = (function () {
     kgToUnit: kgToUnit,
     fmtNumber: fmtNumber,
     formatSet: formatSet,
-    MET_TABLE: MET_TABLE,
+    MET_TABLE: TYPE_MET,
+    MET_TABLE_BY_TYPE: TYPE_MET,
+    BODYWEIGHT_MET: BODYWEIGHT_MET,
     DEFAULT_MET: DEFAULT_MET,
     SECONDS_PER_SET: SECONDS_PER_SET,
     DEFAULT_BODY_KG: DEFAULT_BODY_KG,
     metForExercise: metForExercise,
+    exerciseType: exerciseType,
+    relativeLoad: relativeLoad,
+    loadTier: loadTier,
+    metForSet: metForSet,
+    LOAD_TIERS: LOAD_TIERS,
+    EXERCISE_TYPE: EXERCISE_TYPE,
+    caloriesPerSet: caloriesPerSet,
     bodyKgOn: bodyKgOn,
     caloriesForEntry: caloriesForEntry,
     caloriesForSession: caloriesForSession,

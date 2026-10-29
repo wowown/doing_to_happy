@@ -287,10 +287,51 @@ test("孤立动作 MET 更低", function () {
 test("没收录的动作按 5.0 兜底", function () {
   assert.strictEqual(L.metForExercise("某个没听说过的动作"), 5.0);
 });
-test("热量 = MET × 体重 × 时长 × 组数", function () {
-  // 卧推 6.0 × 70kg × (120/3600)h × 3 组 = 42
+test("热量 = MET × 体重 × 时长 × 组数（60kg 属强档）", function () {
+  // 60kg ÷ 70kg = 0.857 → 强档 6.0；6.0 × 70kg × (120/3600)h = 14 → 每组 14，三组 42
   var entry = { name: "卧推", sets: [{ weight: 60, reps: 8 }, { weight: 60, reps: 8 }, { weight: 60, reps: 8 }] };
   assert.strictEqual(L.caloriesForEntry(entry, 70), 42);
+});
+test("相对负荷分档：20kg 属轻档（3.5），60kg 属强档（6.0）", function () {
+  assert.strictEqual(L.loadTier({ weight: 20, reps: 12, unit: "kg" }, 70).label, "轻");
+  assert.strictEqual(L.loadTier({ weight: 20, reps: 12, unit: "kg" }, 70).met, 3.5);
+  assert.strictEqual(L.loadTier({ weight: 40, reps: 12, unit: "kg" }, 70).label, "中");
+  assert.strictEqual(L.loadTier({ weight: 60, reps: 12, unit: "kg" }, 70).met, 6.0);
+});
+test("回归：以前 20kg 和 60kg 每组算出来一样，现在必须不同", function () {
+  var light = { name: "卧推", sets: [{ weight: 20, reps: 12 }] };
+  var heavy = { name: "卧推", sets: [{ weight: 60, reps: 12 }] };
+  var lightKcal = L.caloriesForEntry(light, 70);
+  var heavyKcal = L.caloriesForEntry(heavy, 70);
+  assert.strictEqual(lightKcal, 8);   // 3.5 × 70 × 2/60 = 8.2 → 8
+  assert.strictEqual(heavyKcal, 14);  // 6.0 × 70 × 2/60 = 14.4 → 14
+  assert.ok(heavyKcal > lightKcal);
+});
+test("同一动作里不同重量能算出不同的数", function () {
+  var entry = { name: "卧推", sets: [{ weight: 20, reps: 12 }, { weight: 60, reps: 12 }] };
+  assert.deepStrictEqual(L.caloriesPerSet(entry, 70), [8, 14]);
+  assert.strictEqual(L.caloriesForEntry(entry, 70), 22);
+});
+test("自重动作（0kg）按动作类型给 MET，不被判成轻档", function () {
+  // 自重卧推没有重量，按复合动作自重档 8.0：8.0 × 70 × 2/60 = 18.7 → 19
+  var entry = { name: "卧推", sets: [{ weight: 0, reps: 15 }] };
+  assert.strictEqual(L.metForSet({ weight: 0, reps: 15, unit: "kg" }, 70, "卧推"), 8.0);
+  assert.strictEqual(L.caloriesForEntry(entry, 70), 19);
+});
+test("磅的记录也参与相对负荷：111lb ÷ 70kg ≈ 0.72，属强档", function () {
+  assert.strictEqual(L.loadTier({ weight: 111, reps: 8, unit: "lb" }, 70).label, "强");
+});
+test("孤立动作同样按相对负荷定档", function () {
+  // 二头弯举 20kg ÷ 70 = 0.29 → 轻档 3.5
+  assert.strictEqual(L.loadTier({ weight: 20, reps: 12, unit: "kg" }, 70).met, 3.5);
+});
+test("动作用户截图里的新动作都被收录，且分型合理", function () {
+  ["夹胸", "史密斯上斜推胸", "坐姿推胸", "哑铃推肩", "三头臂屈伸", "哑铃前平举", "哑铃侧平举", "蝴蝶机后肩后束", "胯内夹"].forEach(function (name) {
+    assert.ok(L.DEFAULT_EXERCISES.indexOf(name) !== -1, name + " 应在默认动作库里");
+    assert.ok(L.metForExercise(name) > 0, name + " 应有 MET");
+  });
+  assert.strictEqual(L.exerciseType("史密斯上斜推胸"), "compound");
+  assert.strictEqual(L.exerciseType("哑铃侧平举"), "isolation");
 });
 test("体重越大估算越高", function () {
   var entry = { name: "卧推", sets: [{ weight: 60, reps: 8 }] };
@@ -327,6 +368,155 @@ test("训练日期早于所有体重记录时用最早那条", function () {
 });
 test("没有体重记录时返回 null，由调用方兜底", function () {
   assert.strictEqual(L.bodyKgOn([], "2026-02-15"), null);
+});
+
+console.log("\n按天汇总");
+test("加一天能跨月", function () {
+  assert.strictEqual(L.addDays("2026-01-31", 1), "2026-02-01");
+});
+test("加一天能跨年", function () {
+  assert.strictEqual(L.addDays("2026-12-31", 1), "2027-01-01");
+});
+test("减一天能跨月", function () {
+  assert.strictEqual(L.addDays("2026-03-01", -1), "2026-02-28");
+});
+test("一天可以有多条训练，合并成同一天的快照", function () {
+  var sessions = [
+    { id: "a", date: "2026-02-10", entries: [{ name: "卧推", sets: [{ weight: 60, reps: 8 }, { weight: 60, reps: 8 }] }] },
+    { id: "b", date: "2026-02-10", entries: [{ name: "深蹲", sets: [{ weight: 80, reps: 5 }] }] },
+    { id: "c", date: "2026-02-11", entries: [{ name: "硬拉", sets: [{ weight: 100, reps: 3 }] }] },
+  ];
+  var view = L.dayView(sessions, [], "2026-02-10");
+  assert.strictEqual(view.sessions.length, 2);
+  assert.deepStrictEqual(view.exercises.map(function (e) { return e.name; }), ["卧推", "深蹲"]);
+  assert.strictEqual(view.volumeKg, 60 * 8 * 2 + 80 * 5);
+});
+test("当天热量的加总等于逐动作相加", function () {
+  var sessions = [
+    { id: "a", date: "2026-02-10", entries: [{ name: "卧推", sets: [{ weight: 60, reps: 8 }] }] },
+    { id: "b", date: "2026-02-10", entries: [{ name: "深蹲", sets: [{ weight: 80, reps: 5 }] }] },
+  ];
+  var weights = [{ date: "2026-02-01", kg: 72 }];
+  var view = L.dayView(sessions, weights, "2026-02-10");
+  var sum = view.exercises.reduce(function (acc, e) { return acc + e.kcal; }, 0);
+  assert.strictEqual(view.calories, sum);
+});
+test("这天没称体重时 bodyKg 为 null，但热量仍用最近一次的体重量", function () {
+  var sessions = [{ id: "a", date: "2026-02-10", entries: [{ name: "卧推", sets: [{ weight: 60, reps: 8 }] }] }];
+  var weights = [{ date: "2026-02-01", kg: 72 }];
+  var view = L.dayView(sessions, weights, "2026-02-10");
+  assert.strictEqual(view.bodyKg, null);
+  assert.strictEqual(view.bodyKgUsed, 72);
+  assert.ok(view.calories > 0);
+});
+test("这天自己称了体重就用这天的", function () {
+  var weights = [
+    { date: "2026-02-01", kg: 72 },
+    { date: "2026-02-10", kg: 70 },
+  ];
+  var sessions = [{ id: "a", date: "2026-02-10", entries: [{ name: "卧推", sets: [{ weight: 60, reps: 8 }] }] }];
+  var view = L.dayView(sessions, weights, "2026-02-10");
+  assert.strictEqual(view.bodyKg, 70);
+  assert.strictEqual(view.bodyKgUsed, 70);
+});
+test("只记了体重没训练的日子也算有数据", function () {
+  var view = L.dayView([], [{ date: "2026-02-10", kg: 70 }], "2026-02-10");
+  assert.strictEqual(view.hasData, true);
+  assert.strictEqual(view.sessions.length, 0);
+  assert.strictEqual(view.calories, 0);
+});
+test("空日子 hasData 为 false", function () {
+  assert.strictEqual(L.dayView([], [], "2026-02-10").hasData, false);
+});
+test("日期列表倒序，且包含只有体重的日期", function () {
+  var sessions = [{ id: "a", date: "2026-02-10", entries: [{ name: "卧推", sets: [{ weight: 60, reps: 8 }] }] }];
+  var weights = [{ date: "2026-02-12", kg: 70 }, { date: "2026-02-01", kg: 72 }];
+  assert.deepStrictEqual(L.dayList(sessions, weights), ["2026-02-12", "2026-02-10", "2026-02-01"]);
+});
+
+console.log("\n有氧记录");
+test("合法有氧记录原样保留", function () {
+  assert.deepStrictEqual(
+    L.normalizeCardioEntry({ date: "2026-02-10", type: "跑步", minutes: 30, intensity: "中", distanceKm: 5.2 }),
+    { date: "2026-02-10", type: "跑步", minutes: 30, intensity: "中", distanceKm: 5.2 }
+  );
+});
+test("不认识的项目返回 null", function () {
+  assert.strictEqual(L.normalizeCardioEntry({ date: "2026-02-10", type: "潜水", minutes: 30 }), null);
+});
+test("0 分钟或超过 600 分钟返回 null", function () {
+  assert.strictEqual(L.normalizeCardioEntry({ date: "2026-02-10", type: "跑步", minutes: 0 }), null);
+  assert.strictEqual(L.normalizeCardioEntry({ date: "2026-02-10", type: "跑步", minutes: 601 }), null);
+});
+test("强度缺失或乱写时按「中」处理", function () {
+  assert.strictEqual(L.normalizeCardioEntry({ date: "2026-02-10", type: "跑步", minutes: 30 }).intensity, "中");
+  assert.strictEqual(L.normalizeCardioEntry({ date: "2026-02-10", type: "跑步", minutes: 30, intensity: "爆炸" }).intensity, "中");
+});
+test("距离可以不填；离谱距离当没填", function () {
+  assert.strictEqual(L.normalizeCardioEntry({ date: "2026-02-10", type: "跑步", minutes: 30, distanceKm: "" }).distanceKm, null);
+  assert.strictEqual(L.normalizeCardioEntry({ date: "2026-02-10", type: "跑步", minutes: 30, distanceKm: 9999 }).distanceKm, null);
+});
+test("分钟数取整", function () {
+  assert.strictEqual(L.normalizeCardioEntry({ date: "2026-02-10", type: "跑步", minutes: 30.6 }).minutes, 31);
+});
+test("有氧热量 = MET × 强度系数 × 体重 × 小时", function () {
+  // 跑步 8.3 × 1.0 × 70kg × 1h = 581
+  var entry = { date: "2026-02-10", type: "跑步", minutes: 60, intensity: "中", distanceKm: null };
+  assert.strictEqual(L.caloriesForCardio(entry, 70), 581);
+});
+test("强度档影响热量：高 1.25 倍，低 0.8 倍", function () {
+  var base = { date: "2026-02-10", type: "跑步", minutes: 60, distanceKm: null };
+  var low = L.caloriesForCardio({ ...base, intensity: "低" }, 70);
+  var mid = L.caloriesForCardio({ ...base, intensity: "中" }, 70);
+  var high = L.caloriesForCardio({ ...base, intensity: "高" }, 70);
+  assert.ok(low < mid && mid < high);
+  assert.strictEqual(low, 465);  // 8.3×0.8×70 = 464.8
+  assert.strictEqual(high, 726); // 8.3×1.25×70 = 726.25
+});
+test("跳绳比快走单位时间消耗高得多", function () {
+  var rope = L.caloriesForCardio({ date: "2026-02-10", type: "跳绳", minutes: 30, intensity: "中" }, 70);
+  var walk = L.caloriesForCardio({ date: "2026-02-10", type: "快走", minutes: 30, intensity: "中" }, 70);
+  assert.ok(rope > walk * 2);
+});
+test("同一天多条有氧累加", function () {
+  var cardio = [
+    { date: "2026-02-10", type: "跑步", minutes: 30, intensity: "中", distanceKm: null },
+    { date: "2026-02-10", type: "跳绳", minutes: 10, intensity: "中", distanceKm: null },
+  ];
+  var weights = [{ date: "2026-02-01", kg: 70 }];
+  var expected = L.caloriesForCardio(cardio[0], 70) + L.caloriesForCardio(cardio[1], 70);
+  assert.strictEqual(L.cardioCaloriesOn(cardio, weights, "2026-02-10"), expected);
+});
+test("按天视图把力量和有氧分开算，合计是两者之和", function () {
+  var sessions = [{ id: "a", date: "2026-02-10", entries: [{ name: "卧推", sets: [{ weight: 60, reps: 8 }] }] }];
+  var weights = [{ date: "2026-02-01", kg: 70 }];
+  var cardio = [{ date: "2026-02-10", type: "跑步", minutes: 30, intensity: "中", distanceKm: 5 }];
+  var view = L.dayView(sessions, weights, "2026-02-10", cardio);
+  assert.ok(view.strengthCalories > 0);
+  assert.strictEqual(view.cardioCalories, L.caloriesForCardio(cardio[0], 70));
+  assert.strictEqual(view.calories, view.strengthCalories + view.cardioCalories);
+  assert.strictEqual(view.cardio.length, 1);
+});
+test("只有有氧的日子也算有数据", function () {
+  var cardio = [{ date: "2026-02-10", type: "骑车", minutes: 45, intensity: "中", distanceKm: 15 }];
+  var view = L.dayView([], [], "2026-02-10", cardio);
+  assert.strictEqual(view.hasData, true);
+  assert.ok(view.cardioCalories > 0);
+  assert.strictEqual(view.volumeKg, 0);
+});
+test("日期列表包含只有有氧的日期", function () {
+  var cardio = [{ date: "2026-02-15", type: "游泳", minutes: 40, intensity: "中", distanceKm: 1 }];
+  assert.deepStrictEqual(L.dayList([], [], cardio), ["2026-02-15"]);
+});
+test("有氧展示文案带距离", function () {
+  assert.strictEqual(
+    L.formatCardio({ date: "2026-02-10", type: "跑步", minutes: 30, intensity: "中", distanceKm: 5.2 }),
+    "跑步 30 分钟（中）· 5.2km"
+  );
+  assert.strictEqual(
+    L.formatCardio({ date: "2026-02-10", type: "跳绳", minutes: 10, intensity: "高", distanceKm: null }),
+    "跳绳 10 分钟（高）"
+  );
 });
 
 console.log("\n" + passed + " 条通过, " + failed + " 条失败\n");

@@ -202,7 +202,10 @@ const INTERACTION = `
     lbHistoryText: lbSession ? [...document.querySelectorAll('#history .hist-body')].map(n => n.textContent).find(t => t.includes('坐姿划船')) : null,
     unitPrefPersisted: localStorage.getItem('fitness-tracker-unit-v1'),
     statCalories: document.getElementById('stat-calories').textContent,
-    firstSessionKcalNote: document.querySelector('#history .hist-item:last-child .hist-note')?.textContent || '',
+    dayDate: document.getElementById('day-date').value,
+    daySummary: document.getElementById('day-summary').textContent.trim(),
+    dayBodyEntries: document.querySelectorAll('#day-body .entry').length,
+    historyDays: document.querySelectorAll('#history .hist-item').length,
   };
 })()
 `;
@@ -340,6 +343,169 @@ async function main() {
     const shot3 = await cdp.send("Page.captureScreenshot", { format: "png", captureBeyondViewport: true });
     await fs.writeFile(path.join(OUT_DIR, "draft-units.png"), Buffer.from(shot3.data, "base64"));
     report.screenshots.push("shot/draft-units.png");
+
+    // 相对负荷分档：同一动作里 20kg 和 60kg 必须算出不同的热量
+    await cdp.send("Page.navigate", { url: `http://127.0.0.1:${HTTP_PORT}/index.html` });
+    await new Promise((r) => setTimeout(r, 900));
+    const loadCheck = await cdp.send("Runtime.evaluate", {
+      expression: `(async () => {
+        const wait = () => new Promise(r => setTimeout(r, 80));
+        // 先确保默认单位是 kg：前面的步骤把偏好切成了 lb，留着会让这组数字按磅算
+        document.querySelectorAll('#unit-switch button')[0].click();
+        await wait();
+        document.getElementById('exercise-select').value = '卧推';
+        document.getElementById('add-exercise').click();
+        await wait();
+        document.querySelector('#entries .entry button.ghost').click();
+        await wait();
+        const rows = [...document.querySelectorAll('#entries .set-row')];
+        [['20', '12'], ['60', '12']].forEach(([w, r], i) => {
+          const ins = rows[i].querySelectorAll('input');
+          ins[0].value = w; ins[0].dispatchEvent(new Event('input', { bubbles: true }));
+          ins[1].value = r; ins[1].dispatchEvent(new Event('input', { bubbles: true }));
+        });
+        await wait();
+        const hints = [...document.querySelectorAll('#entries .hint')];
+        return {
+          hintText: (hints[hints.length - 1] || {}).textContent || '',
+          perSet: window.FitnessLogic.caloriesPerSet(
+            { name: '卧推', sets: [{ weight: 20, reps: 12, unit: 'kg' }, { weight: 60, reps: 12, unit: 'kg' }] },
+            72.1
+          ),
+        };
+      })()`,
+      awaitPromise: true,
+      returnByValue: true,
+    });
+    report.loadTiers = loadCheck.result.value;
+    report.steps.push("相对负荷分档检查完成（20kg 与 60kg 不再是同一个数）");
+    const shotLoad = await cdp.send("Page.captureScreenshot", { format: "png", captureBeyondViewport: true });
+    await fs.writeFile(path.join(OUT_DIR, "load-tiers.png"), Buffer.from(shotLoad.data, "base64"));
+    report.screenshots.push("shot/load-tiers.png");
+
+    // 动作搜索：输入关键词筛选下拉框，回车直接加
+    await cdp.send("Page.navigate", { url: `http://127.0.0.1:${HTTP_PORT}/index.html` });
+    await new Promise((r) => setTimeout(r, 900));
+    const searchCheck = await cdp.send("Runtime.evaluate", {
+      expression: `(async () => {
+        const wait = () => new Promise(r => setTimeout(r, 80));
+        const filter = document.getElementById('exercise-filter');
+        const totalBefore = document.getElementById('exercise-select').options.length;
+        filter.value = '推';
+        filter.dispatchEvent(new Event('input', { bubbles: true }));
+        await wait();
+        const filtered = [...document.getElementById('exercise-select').options].map(o => o.value);
+        filter.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+        await wait();
+        return {
+          totalBefore,
+          filtered,
+          hasChestPress: filtered.includes('坐姿推胸'),
+          hasSquat: filtered.includes('深蹲'),
+          filterAfterAdd: filter.value,
+          optionsAfterClear: document.getElementById('exercise-select').options.length,
+          entries: [...document.querySelectorAll('#entries .entry-name')].map(n => n.textContent),
+        };
+      })()`,
+      awaitPromise: true,
+      returnByValue: true,
+    });
+    if (searchCheck.exceptionDetails) throw new Error("搜索脚本报错: " + JSON.stringify(searchCheck.exceptionDetails));
+    report.exerciseSearch = searchCheck.result.value;
+    report.steps.push("动作搜索检查完成（筛「推」/ 回车加动作 / 加完清空关键词）");
+    const shotSearch = await cdp.send("Page.captureScreenshot", { format: "png", captureBeyondViewport: true });
+    await fs.writeFile(path.join(OUT_DIR, "exercise-search.png"), Buffer.from(shotSearch.data, "base64"));
+    report.screenshots.push("shot/exercise-search.png");
+
+    // 有氧：记一条跑步，检查热量、进某一天、跳绳时隐藏距离
+    const cardioCheck = await cdp.send("Runtime.evaluate", {
+      expression: `(async () => {
+        const wait = () => new Promise(r => setTimeout(r, 80));
+        const out = {};
+        const typeSel = document.getElementById('cardio-type');
+        const dist = document.getElementById('cardio-distance');
+        // 跳绳不该显示距离
+        typeSel.value = '跳绳';
+        typeSel.dispatchEvent(new Event('change', { bubbles: true }));
+        await wait();
+        out.distanceHiddenForRope = dist.style.display === 'none';
+
+        typeSel.value = '跑步';
+        typeSel.dispatchEvent(new Event('change', { bubbles: true }));
+        await wait();
+        out.distanceShownForRun = dist.style.display !== 'none';
+
+        document.getElementById('cardio-minutes').value = '30';
+        dist.value = '5.2';
+        document.getElementById('cardio-intensity').value = '中';
+        document.getElementById('save-cardio').click();
+        await wait();
+
+        const stored = JSON.parse(localStorage.getItem('fitness-tracker-cardio-v1') || '[]');
+        out.stored = stored.length;
+        out.storedEntry = stored[0] || null;
+        out.listText = (document.querySelector('#cardio-list .hist-top') || {}).textContent || '';
+        out.daySummary = document.getElementById('day-summary').textContent.trim();
+        out.statCalories = document.getElementById('stat-calories').textContent;
+        out.distanceCleared = dist.value === '';
+        // 删掉它，避免影响后面的截图与检查
+        const del = document.querySelector('#cardio-list .del');
+        if (del) { del.click(); await wait(); }
+        out.afterDelete = JSON.parse(localStorage.getItem('fitness-tracker-cardio-v1') || '[]').length;
+        return out;
+      })()`,
+      awaitPromise: true,
+      returnByValue: true,
+    });
+    if (cardioCheck.exceptionDetails) throw new Error("有氧脚本报错: " + JSON.stringify(cardioCheck.exceptionDetails));
+    report.cardio = cardioCheck.result.value;
+    report.steps.push("有氧检查完成（距离按项目显示 / 记录 / 进某一天 / 删除）");
+
+    // 按天视图：翻页、只看体重的日子、删除整次训练
+    const dayCheck = await cdp.send("Runtime.evaluate", {
+      expression: `(async () => {
+        const wait = () => new Promise(r => setTimeout(r, 80));
+        const out = {};
+        // 1. 跳到只有体重的日子（2026-02-11）
+        const dateInput = document.getElementById('day-date');
+        dateInput.value = '2026-02-11';
+        dateInput.dispatchEvent(new Event('change', { bubbles: true }));
+        await wait();
+        out.weightOnlySummary = document.getElementById('day-summary').textContent.trim();
+        out.weightOnlyBody = document.getElementById('day-body').textContent.trim();
+
+        // 2. 往前翻一天，应当跳到 2026-02-10（有训练的那天）
+        document.getElementById('day-prev').click();
+        await wait();
+        out.afterPrevDate = document.getElementById('day-date').value;
+        out.afterPrevSummary = document.getElementById('day-summary').textContent.trim();
+
+        // 3. 回今天，删除其中一次训练
+        document.getElementById('day-today').click();
+        await wait();
+        const before = JSON.parse(localStorage.getItem('fitness-tracker-v1') || '[]').length;
+        window.confirm = () => true; // 自动确认，浏览器里的 confirm 会卡住脚本
+        const delBtn = document.querySelector('#day-body .del');
+        if (!delBtn) { out.deleteError = '没有找到删除按钮'; return out; }
+        delBtn.click();
+        await wait();
+        const after = JSON.parse(localStorage.getItem('fitness-tracker-v1') || '[]').length;
+        out.sessionsBeforeDelete = before;
+        out.sessionsAfterDelete = after;
+        out.summaryAfterDelete = document.getElementById('day-summary').textContent.trim();
+        out.historyDaysAfterDelete = document.querySelectorAll('#history .hist-item').length;
+        return out;
+      })()`,
+      awaitPromise: true,
+      returnByValue: true,
+    });
+    if (dayCheck.exceptionDetails) throw new Error("按天视图脚本报错: " + JSON.stringify(dayCheck.exceptionDetails));
+    report.dayView = dayCheck.result.value;
+    report.steps.push("按天视图检查完成（翻页 / 只有体重的日子 / 删除训练）");
+
+    const shotDay = await cdp.send("Page.captureScreenshot", { format: "png", captureBeyondViewport: true });
+    await fs.writeFile(path.join(OUT_DIR, "day-view.png"), Buffer.from(shotDay.data, "base64"));
+    report.screenshots.push("shot/day-view.png");
 
     // 示例模式截图（看曲线长什么样）
     await cdp.send("Page.navigate", { url: `http://127.0.0.1:${HTTP_PORT}/index.html?demo=1` });

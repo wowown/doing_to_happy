@@ -13,8 +13,15 @@
   var state = {
     sessions: [],
     weights: [],
+    cardio: [],
     // unit：当前默认重量单位（kg/lb）。只影响新加的组和展示，已有记录保留自己的原始单位。
     unit: "kg",
+    // dayDate：下面「某一天」卡片正在看哪天。默认今天。
+    dayDate: L.todayISO(),
+    // exerciseFilter：动作搜索关键词，只影响下拉框里能看到哪些动作
+    exerciseFilter: "",
+    // cardioDate：有氧卡片正在记录的日期
+    cardioDate: L.todayISO(),
     draft: { date: L.todayISO(), note: "", entries: [] },
     progressExercise: "",
     demoMode: false,
@@ -25,9 +32,16 @@
     note: document.getElementById("note"),
     entries: document.getElementById("entries"),
     select: document.getElementById("exercise-select"),
+    exerciseFilter: document.getElementById("exercise-filter"),
     custom: document.getElementById("custom-exercise"),
     save: document.getElementById("save"),
     unitSwitch: document.getElementById("unit-switch"),
+    dayDate: document.getElementById("day-date"),
+    dayPrev: document.getElementById("day-prev"),
+    dayNext: document.getElementById("day-next"),
+    dayToday: document.getElementById("day-today"),
+    daySummary: document.getElementById("day-summary"),
+    dayBody: document.getElementById("day-body"),
     history: document.getElementById("history"),
     progressSelect: document.getElementById("progress-exercise"),
     chart: document.getElementById("chart"),
@@ -38,6 +52,13 @@
     weightStats: document.getElementById("weight-stats"),
     weightChart: document.getElementById("weight-chart"),
     weightList: document.getElementById("weight-list"),
+    cardioDate: document.getElementById("cardio-date"),
+    cardioType: document.getElementById("cardio-type"),
+    cardioMinutes: document.getElementById("cardio-minutes"),
+    cardioIntensity: document.getElementById("cardio-intensity"),
+    cardioDistance: document.getElementById("cardio-distance"),
+    saveCardio: document.getElementById("save-cardio"),
+    cardioList: document.getElementById("cardio-list"),
     statSessions: document.getElementById("stat-sessions"),
     statVolume: document.getElementById("stat-volume"),
     statExercises: document.getElementById("stat-exercises"),
@@ -112,6 +133,29 @@
     }
   }
 
+  /** 有氧记录：第三个独立存储键。 */
+  function loadCardio() {
+    try {
+      var raw = localStorage.getItem(L.CARDIO_STORAGE_KEY);
+      if (!raw) return [];
+      var parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return [];
+      return parsed.map(L.normalizeCardioEntry).filter(Boolean);
+    } catch (error) {
+      console.warn("读取有氧记录失败，从空记录开始", error);
+      return [];
+    }
+  }
+
+  function persistCardio() {
+    if (state.demoMode) return;
+    try {
+      localStorage.setItem(L.CARDIO_STORAGE_KEY, JSON.stringify(state.cardio));
+    } catch (error) {
+      alert("有氧保存失败：浏览器可能禁用了本地存储。\n" + error.message);
+    }
+  }
+
   // ---------- 渲染 ----------
   /** 某天的体重（当天或之前最近一次）。没有记录返回 null，交给 logic 兜底。 */
   function bodyKgOn(date) {
@@ -130,16 +174,22 @@
     el.statSessions.textContent = s.sessions;
     el.statVolume.textContent = Math.round(s.volume).toLocaleString("zh-CN");
     el.statExercises.textContent = s.exercises;
-    // 每次训练用它自己那天的体重算，再加总
-    var calories = state.sessions.reduce(function (sum, session) {
+    // 力量按每次训练当天的体重算，有氧按有氧当天的体重算，最后加总
+    var strengthCalories = state.sessions.reduce(function (sum, session) {
       return sum + L.caloriesForSession(session, bodyKgOn(session.date));
     }, 0);
-    el.statCalories.textContent = calories.toLocaleString("zh-CN");
-    el.statCalories.title = "按 MET 估算，每组 2 分钟，误差可能有 ±30%";
+    var cardioCalories = state.cardio.reduce(function (sum, entry) {
+      return sum + L.caloriesForCardio(entry, bodyKgOn(entry.date));
+    }, 0);
+    el.statCalories.textContent = (strengthCalories + cardioCalories).toLocaleString("zh-CN");
+    el.statCalories.title = "力量 ≈" + strengthCalories + " + 有氧 ≈" + cardioCalories +
+      "（按 MET 估算，误差可能有 ±30%）";
     renderEntries();
     renderExerciseOptions();
     renderUnitSwitch();
-    renderHistory();
+    renderCardio();
+    renderDay();
+    renderDayList();
     renderWeight();
     renderProgress();
   }
@@ -210,6 +260,7 @@
           // 记住精确的 kg 值：单位来回切换时靠它复原，避免 111 → 50.3 → 110.9 这种漂移
           var n = Number(weight.value);
           set._kg = weight.value !== "" && isFinite(n) ? L.setToKg({ weight: n, unit: set.unit }) : null;
+          refreshCal(); // 热量跟这组的重量有关，改重量就要跟着变
         });
         row.appendChild(weight);
 
@@ -246,6 +297,7 @@
         reps.value = set.reps;
         reps.addEventListener("input", function () {
           set.reps = reps.value;
+          refreshCal();
         });
         row.appendChild(reps);
 
@@ -280,51 +332,101 @@
       });
       box.appendChild(addSet);
 
-      // 这个动作当前的估算热量：填了几组就算几组，空组不算
-      var filled = entry.sets.filter(function (set) {
-        var w = Number(set.weight);
-        var r = Number(set.reps);
-        return set.weight !== "" && set.reps !== "" && isFinite(w) && isFinite(r) && r > 0;
-      }).length;
-      if (filled > 0) {
+      // 这个动作当前的估算热量：填了几组就算几组，空组不算。
+      // 逐组算，因为热量现在跟「这一组有多重」有关——20kg 和 60kg 不再是同一个数。
+      // 单独抽成函数是为了在输入时只更新这一行，不整块重画（重画会掉光标）。
+      var calLine = document.createElement("div");
+      calLine.className = "hint";
+      calLine.style.marginTop = "8px";
+      calLine.title = "MET 按「单组重量 ÷ 体重」分档：<0.3 轻(3.5) · 0.3–0.6 中(5.0) · ≥0.6 强(6.0)";
+      box.appendChild(calLine);
+
+      function refreshCal() {
+        var filledSets = entry.sets.filter(function (set) {
+          var w = Number(set.weight);
+          var r = Number(set.reps);
+          return set.weight !== "" && set.reps !== "" && isFinite(w) && isFinite(r) && r > 0;
+        });
+        if (filledSets.length === 0) {
+          calLine.style.display = "none";
+          return;
+        }
+        calLine.style.display = "";
         var bodyKg = bodyKgOn(state.draft.date);
-        var kcal = L.caloriesForEntry({ name: entry.name, sets: new Array(filled).fill(null) }, bodyKg);
-        var perSet = L.caloriesForEntry({ name: entry.name, sets: [null] }, bodyKg);
-        var calLine = document.createElement("div");
-        calLine.className = "hint";
-        calLine.style.marginTop = "8px";
-        calLine.innerHTML = "本次 " + filled + " 组 ≈ <b>" + kcal + "</b> kcal（每组 ≈" + perSet + "）· " +
+        var perSet = L.caloriesPerSet({ name: entry.name, sets: filledSets }, bodyKg);
+        var kcal = perSet.reduce(function (sum, value) {
+          return sum + value;
+        }, 0);
+        var sameEach = perSet.every(function (value) {
+          return value === perSet[0];
+        });
+        var detail = sameEach ? "每组 ≈" + perSet[0] : "逐组 " + perSet.join(" / ");
+        calLine.innerHTML = "本次 " + filledSets.length + " 组 ≈ <b>" + kcal + "</b> kcal（" + detail + "）· " +
           calorieBasisText(state.draft.date);
-        box.appendChild(calLine);
       }
+      refreshCal();
 
       el.entries.appendChild(box);
     });
   }
 
+  /**
+   * 动作下拉框。搜索框有内容时只留下名字里包含关键词的选项（包含匹配，
+   * 不是开头匹配——输「推」要能找到「史密斯上斜推胸」）。
+   * 排序：练得最多的在前，然后默认动作库，最后是自定义动作。
+   */
   function renderExerciseOptions() {
-    var names = L.DEFAULT_EXERCISES.slice();
-    L.usedExercises(state.sessions).forEach(function (name) {
-      if (names.indexOf(name) === -1) names.push(name);
+    var allNames = L.DEFAULT_EXERCISES.slice();
+    var used = L.usedExercises(state.sessions);
+    used.forEach(function (name) {
+      if (allNames.indexOf(name) === -1) allNames.push(name);
     });
     // 自定义动作也要能继续练
     state.draft.entries.forEach(function (entry) {
-      if (names.indexOf(entry.name) === -1) names.push(entry.name);
+      if (allNames.indexOf(entry.name) === -1) allNames.push(entry.name);
     });
+    // 常用动作提到前面：常在练的不用滚
+    allNames.sort(function (a, b) {
+      var ia = used.indexOf(a);
+      var ib = used.indexOf(b);
+      if (ia !== -1 && ib !== -1) return ia - ib;
+      if (ia !== -1) return -1;
+      if (ib !== -1) return 1;
+      return 0;
+    });
+
+    var keyword = (state.exerciseFilter || "").trim();
+    var matched = keyword
+      ? allNames.filter(function (name) {
+          return name.indexOf(keyword) !== -1;
+        })
+      : allNames;
 
     var current = el.select.value;
     el.select.innerHTML = "";
-    names.forEach(function (name) {
-      var option = document.createElement("option");
-      option.value = name;
-      option.textContent = name;
-      el.select.appendChild(option);
-    });
-    if (current && names.indexOf(current) !== -1) el.select.value = current;
+    if (matched.length === 0) {
+      // 没有匹配时给一条提示，而不是留个空下拉框让人以为坏了
+      var none = document.createElement("option");
+      none.value = "";
+      none.textContent = "没有匹配的动作，用下面「没有的动作用这里」添加";
+      none.disabled = true;
+      none.selected = true;
+      el.select.appendChild(none);
+    } else {
+      matched.forEach(function (name) {
+        var option = document.createElement("option");
+        option.value = name;
+        option.textContent = name;
+        el.select.appendChild(option);
+      });
+      // 原来的选中项还在就保持，否则落到第一个匹配项，让「+ 加动作」和回车都能直接用
+      el.select.value = current && matched.indexOf(current) !== -1 ? current : matched[0];
+    }
 
-    var progressCurrent = state.progressExercise || names[0] || "";
+    // 曲线选择器的选项要全（不受搜索影响），只在列表变化时重画
+    var progressCurrent = state.progressExercise || allNames[0] || "";
     el.progressSelect.innerHTML = "";
-    names.forEach(function (name) {
+    allNames.forEach(function (name) {
       var option = document.createElement("option");
       option.value = name;
       option.textContent = name;
@@ -356,10 +458,187 @@
     });
   }
 
-  function renderHistory() {
+  /**
+   * 有氧区：类型和强度下拉只建一次，下面列出所选日期已记的有氧（可删）。
+   * 距离输入只对有距离意义的项目显示——跳绳填「距离」没有意义。
+   */
+  var cardioFormReady = false;
+  function renderCardio() {
+    el.cardioDate.value = state.cardioDate;
+    if (!cardioFormReady) {
+      el.cardioType.innerHTML = "";
+      L.CARDIO_TYPES.forEach(function (info) {
+        var option = document.createElement("option");
+        option.value = info.name;
+        option.textContent = info.name;
+        el.cardioType.appendChild(option);
+      });
+      el.cardioIntensity.innerHTML = "";
+      L.CARDIO_INTENSITY.forEach(function (item) {
+        var option = document.createElement("option");
+        option.value = item.key;
+        option.textContent = item.key + "强度";
+        el.cardioIntensity.appendChild(option);
+      });
+      el.cardioIntensity.value = "中";
+      cardioFormReady = true;
+    }
+
+    var info = L.cardioTypeInfo(el.cardioType.value);
+    el.cardioDistance.style.display = info && info.hasDistance ? "" : "none";
+
+    var todays = L.cardioOn(state.cardio, state.cardioDate);
+    var basis = bodyKgOn(state.cardioDate);
+    el.cardioList.innerHTML = "";
+    if (todays.length === 0) {
+      var empty = document.createElement("div");
+      empty.className = "empty";
+      empty.textContent = "这天还没有有氧记录。";
+      el.cardioList.appendChild(empty);
+      return;
+    }
+
+    todays.forEach(function (entry) {
+      var row = document.createElement("div");
+      row.className = "hist-top";
+      var left = document.createElement("div");
+      left.textContent = L.formatCardio(entry);
+      var right = document.createElement("div");
+      right.className = "row";
+      var kcal = document.createElement("div");
+      kcal.className = "hist-date";
+      kcal.textContent = "≈" + L.caloriesForCardio(entry, basis) + " kcal";
+      var del = document.createElement("button");
+      del.className = "del";
+      del.textContent = "✕";
+      del.title = "删掉这条有氧";
+      del.addEventListener("click", function () {
+        // 按对象引用删，比用下标稳（列表随时可能重排）
+        state.cardio = state.cardio.filter(function (item) {
+          return item !== entry;
+        });
+        persistCardio();
+        renderAll();
+      });
+      right.appendChild(kcal);
+      right.appendChild(del);
+      row.appendChild(left);
+      row.appendChild(right);
+      el.cardioList.appendChild(row);
+    });
+  }
+
+  /** 「某一天」：选中的那天练了什么、消耗多少、体重多少，可以左右翻天。 */
+  function renderDay() {
+    var view = L.dayView(state.sessions, state.weights, state.dayDate, state.cardio);
+    el.dayDate.value = state.dayDate;
+
+    var parts = [];
+    if (view.sessions.length > 0) {
+      parts.push(view.sessions.length + " 次训练");
+      parts.push("容量 " + view.volumeKg.toLocaleString("zh-CN") + " kg");
+    }
+    // 力量和分有氧分开列：合成一个总数会让人以为有氧白练了
+    var calorieParts = [];
+    if (view.strengthCalories > 0) calorieParts.push("力量 ≈" + view.strengthCalories);
+    if (view.cardioCalories > 0) calorieParts.push("有氧 ≈" + view.cardioCalories);
+    if (calorieParts.length > 0) parts.push(calorieParts.join(" + ") + " kcal");
+    // 这天自己称了体重才算数；没称就是「未记录」，不拿别的日子顶替
+    parts.push(view.bodyKg === null ? "体重未记录" : "体重 " + view.bodyKg + " kg");
+    el.daySummary.textContent = parts.join(" · ");
+
+    el.dayBody.innerHTML = "";
+    if (!view.hasData) {
+      var empty = document.createElement("div");
+      empty.className = "empty";
+      empty.textContent = "这天没有任何记录。";
+      el.dayBody.appendChild(empty);
+      return;
+    }
+
+    view.sessions.forEach(function (session, index) {
+      var box = document.createElement("div");
+      box.className = "entry";
+
+      var head = document.createElement("div");
+      head.className = "entry-head";
+      var title = document.createElement("div");
+      title.className = "entry-name";
+      title.textContent = view.sessions.length > 1 ? "第 " + (index + 1) + " 次训练" : "训练";
+      var remove = document.createElement("button");
+      remove.className = "del";
+      remove.textContent = "删除这次训练";
+      remove.addEventListener("click", function () {
+        if (!confirm("删掉 " + session.date + " 的这次训练？删了之后没法从界面上恢复。")) return;
+        state.sessions = state.sessions.filter(function (item) {
+          return item.id !== session.id;
+        });
+        persist();
+        renderAll();
+      });
+      head.appendChild(title);
+      head.appendChild(remove);
+      box.appendChild(head);
+
+      var body = document.createElement("div");
+      body.className = "hist-body";
+      body.textContent = L.summarizeSession(session);
+      box.appendChild(body);
+
+      var kcal = L.caloriesForSession(session, view.bodyKgUsed);
+      var calNote = document.createElement("div");
+      calNote.className = "hist-note";
+      calNote.textContent = "≈ " + kcal + " kcal · " + calorieBasisText(session.date);
+      box.appendChild(calNote);
+
+      if (session.note) {
+        var note = document.createElement("div");
+        note.className = "hist-note";
+        note.textContent = session.note;
+        box.appendChild(note);
+      }
+
+      el.dayBody.appendChild(box);
+    });
+
+    // 有氧明细（查看用；要删去上面的「有氧」卡片，选同一天就能删）
+    if (view.cardio.length > 0) {
+      var cardioBox = document.createElement("div");
+      cardioBox.className = "entry";
+      var cardioHead = document.createElement("div");
+      cardioHead.className = "entry-head";
+      var cardioTitle = document.createElement("div");
+      cardioTitle.className = "entry-name";
+      cardioTitle.textContent = "有氧";
+      var cardioKcal = document.createElement("div");
+      cardioKcal.className = "hist-date";
+      cardioKcal.textContent = "≈ " + view.cardioCalories + " kcal";
+      cardioHead.appendChild(cardioTitle);
+      cardioHead.appendChild(cardioKcal);
+      cardioBox.appendChild(cardioHead);
+
+      view.cardio.forEach(function (entry) {
+        var line = document.createElement("div");
+        line.className = "hist-body";
+        line.textContent = L.formatCardio(entry) + " · ≈" + L.caloriesForCardio(entry, view.bodyKgUsed) + " kcal";
+        cardioBox.appendChild(line);
+      });
+      el.dayBody.appendChild(cardioBox);
+    }
+
+    if (view.sessions.length === 0 && view.cardio.length === 0) {
+      var onlyWeight = document.createElement("div");
+      onlyWeight.className = "empty";
+      onlyWeight.textContent = "这天只记了体重，没有训练也没有有氧。";
+      el.dayBody.appendChild(onlyWeight);
+    }
+  }
+
+  /** 历史：按天分组，一天一块。点某一天就跳到上面那天的详情。 */
+  function renderDayList() {
     el.history.innerHTML = "";
-    var sessions = L.sortSessionsDesc(state.sessions);
-    if (sessions.length === 0) {
+    var dates = L.dayList(state.sessions, state.weights, state.cardio);
+    if (dates.length === 0) {
       var empty = document.createElement("div");
       empty.className = "empty";
       empty.textContent = "还没有记录。上面填一次，保存后就会出现在这里。";
@@ -367,42 +646,44 @@
       return;
     }
 
-    sessions.forEach(function (session) {
+    dates.forEach(function (date) {
+      var view = L.dayView(state.sessions, state.weights, date, state.cardio);
+
       var item = document.createElement("div");
       item.className = "hist-item";
+      item.style.cursor = "pointer";
+      item.title = "点一下看这天的详情";
 
       var top = document.createElement("div");
       top.className = "hist-top";
-      var date = document.createElement("div");
-      date.className = "hist-date";
-      date.textContent = session.date;
+      var left = document.createElement("div");
+      left.className = "hist-date";
+      left.textContent = date;
       var right = document.createElement("div");
       right.className = "hist-date";
-      // 容量统一用 kg 展示，且取整：混着磅的记录换算后会出现 2245.5681735 这种数
-      right.textContent = "容量 " + Math.round(L.sessionVolume(session)).toLocaleString("zh-CN") + " kg";
-      top.appendChild(date);
+      var bits = [];
+      bits.push(view.bodyKg === null ? "体重 —" : "体重 " + view.bodyKg + "kg");
+      if (view.calories > 0) bits.push("≈" + view.calories + " kcal");
+      right.textContent = bits.join(" · ");
+      top.appendChild(left);
       top.appendChild(right);
 
       var body = document.createElement("div");
       body.className = "hist-body";
-      body.textContent = L.summarizeSession(session);
+      var lines = view.sessions.map(L.summarizeSession);
+      if (view.cardio.length > 0) {
+        lines.push("有氧 " + view.cardio.reduce(function (sum, e) { return sum + e.minutes; }, 0) + " 分钟");
+      }
+      body.textContent = lines.length > 0 ? lines.join(" ｜ ") : "只记了体重";
 
       item.appendChild(top);
       item.appendChild(body);
 
-      // 热量按这次训练当天的体重估，并写明依据，避免让人以为是精确测出来的
-      var kcal = L.caloriesForSession(session, bodyKgOn(session.date));
-      var calNote = document.createElement("div");
-      calNote.className = "hist-note";
-      calNote.textContent = "≈ " + kcal + " kcal · " + calorieBasisText(session.date) + " · 每组按 2 分钟";
-      item.appendChild(calNote);
-
-      if (session.note) {
-        var note = document.createElement("div");
-        note.className = "hist-note";
-        note.textContent = session.note;
-        item.appendChild(note);
-      }
+      item.addEventListener("click", function () {
+        state.dayDate = date;
+        renderDay();
+        document.getElementById("day-card").scrollIntoView({ behavior: "smooth", block: "start" });
+      });
 
       el.history.appendChild(item);
     });
@@ -612,13 +893,46 @@
     } else {
       state.draft.entries.push({ name: trimmed, sets: [emptySet()] });
     }
+    // 加完就清掉搜索词：继续加下一个时应该看到完整列表，而不是还停在上次的关键词里
+    state.exerciseFilter = "";
+    if (el.exerciseFilter) el.exerciseFilter.value = "";
     renderEntries();
     renderExerciseOptions();
   }
 
+  // 动作搜索：输入即筛选下拉框，回车直接加当前选中的那个
+  el.exerciseFilter.addEventListener("input", function () {
+    state.exerciseFilter = el.exerciseFilter.value;
+    renderExerciseOptions();
+  });
+  el.exerciseFilter.addEventListener("keydown", function (event) {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    if (el.select.value) addExercise(el.select.value);
+  });
+
   el.date.addEventListener("change", function () {
     state.draft.date = el.date.value;
     renderEntries(); // 热量是按「当天体重」估的，日期变了要跟着重算
+  });
+
+  // 「某一天」的翻页与跳转
+  el.dayDate.addEventListener("change", function () {
+    if (!el.dayDate.value) return;
+    state.dayDate = el.dayDate.value;
+    renderDay();
+  });
+  el.dayPrev.addEventListener("click", function () {
+    state.dayDate = L.addDays(state.dayDate, -1);
+    renderDay();
+  });
+  el.dayNext.addEventListener("click", function () {
+    state.dayDate = L.addDays(state.dayDate, 1);
+    renderDay();
+  });
+  el.dayToday.addEventListener("click", function () {
+    state.dayDate = L.todayISO();
+    renderDay();
   });
   el.note.addEventListener("input", function () {
     state.draft.note = el.note.value;
@@ -660,6 +974,8 @@
     persist();
     state.draft = { date: cleaned.date, note: "", entries: [] };
     el.note.value = "";
+    // 存完把「某一天」跳到刚记的这天，省得自己再选一次
+    state.dayDate = cleaned.date;
     renderAll();
   });
 
@@ -692,14 +1008,49 @@
     if (event.key === "Enter") el.saveWeight.click();
   });
 
+  // ---------- 有氧 ----------
+  el.cardioDate.addEventListener("change", function () {
+    if (!el.cardioDate.value) return;
+    state.cardioDate = el.cardioDate.value;
+    renderCardio();
+  });
+  el.cardioType.addEventListener("change", function () {
+    renderCardio(); // 换项目要决定「距离」这一栏还不还在
+  });
+  el.saveCardio.addEventListener("click", function () {
+    if (state.demoMode) {
+      alert("示例模式不保存。用 index.html 正常打开再记。");
+      return;
+    }
+    var entry = L.normalizeCardioEntry({
+      date: el.cardioDate.value || L.todayISO(),
+      type: el.cardioType.value,
+      minutes: el.cardioMinutes.value,
+      intensity: el.cardioIntensity.value,
+      distanceKm: el.cardioDistance.value,
+    });
+    if (!entry) {
+      alert("有氧存不了：类型要选对，时长填 1–600 之间的分钟数。");
+      return;
+    }
+    state.cardio.push(entry);
+    persistCardio();
+    el.cardioMinutes.value = "";
+    el.cardioDistance.value = "";
+    // 记完跳到那天，跟训练记录一样的习惯
+    state.dayDate = entry.date;
+    renderAll();
+  });
+
   el.exportBtn.addEventListener("click", function () {
-    // 备份必须一次带走全部数据：只导出训练记录的话，体重就漏在外面了。
+    // 备份必须一次带走全部数据：漏掉哪一类，那一类就等于没有备份
     var payload = {
       app: "fitness-tracker",
-      version: 2,
+      version: 3,
       exportedAt: new Date().toISOString(),
       sessions: state.sessions,
       weights: state.weights,
+      cardio: state.cardio,
     };
     var blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
     var url = URL.createObjectURL(blob);
@@ -727,15 +1078,18 @@
         return;
       }
 
-      // 两种格式都认：旧版直接是训练记录数组，新版是 {sessions, weights} 对象
+      // 三种格式都认：旧版纯训练数组、v2 的 {sessions, weights}、v3 加了 cardio
       var incomingSessions;
       var incomingWeights;
+      var incomingCardio;
       if (Array.isArray(incoming)) {
         incomingSessions = incoming;
         incomingWeights = [];
+        incomingCardio = [];
       } else if (incoming && Array.isArray(incoming.sessions)) {
         incomingSessions = incoming.sessions;
         incomingWeights = Array.isArray(incoming.weights) ? incoming.weights : [];
+        incomingCardio = Array.isArray(incoming.cardio) ? incoming.cardio : [];
       } else {
         alert("文件格式不对：既不是训练记录数组，也不是带 sessions 的对象。");
         return;
@@ -761,10 +1115,28 @@
         if (state.weights.length > before) addedWeights++;
       });
 
+      // 有氧没有 id，按内容去重：同一天同类型同时长同强度视为同一条
+      var cardioKeys = {};
+      state.cardio.forEach(function (entry) {
+        cardioKeys[entry.date + "|" + entry.type + "|" + entry.minutes + "|" + entry.intensity] = true;
+      });
+      var addedCardio = 0;
+      incomingCardio.map(L.normalizeCardioEntry).filter(Boolean).forEach(function (entry) {
+        var key = entry.date + "|" + entry.type + "|" + entry.minutes + "|" + entry.intensity;
+        if (cardioKeys[key]) return;
+        cardioKeys[key] = true;
+        state.cardio.push(entry);
+        addedCardio++;
+      });
+
       persist();
       persistWeights();
+      persistCardio();
       renderAll();
-      alert("导入完成：训练记录新增 " + addedSessions + " 条，体重新增 " + addedWeights + " 条。");
+      alert(
+        "导入完成：训练记录新增 " + addedSessions + " 条，体重新增 " + addedWeights +
+        " 条，有氧新增 " + addedCardio + " 条。"
+      );
       el.importFile.value = "";
     };
     reader.readAsText(file);
@@ -801,17 +1173,33 @@
     state.weights = plan.map(function (row, i) {
       return L.normalizeWeightEntry({ date: row.date, kg: 78 - i * 0.6 });
     });
+
+    // 有氧示例：最后一次训练那天加了 30 分钟跑步，演示「力量 + 有氧」分开计
+    state.cardio = [
+      L.normalizeCardioEntry({ date: "2026-02-10", type: "跑步", minutes: 30, intensity: "中", distanceKm: 5.2 }),
+      L.normalizeCardioEntry({ date: "2026-02-03", type: "跳绳", minutes: 10, intensity: "高", distanceKm: null }),
+    ].filter(Boolean);
   }
 
   function init() {
     el.date.value = state.draft.date;
     el.weightDate.value = L.todayISO();
+    el.cardioDate.value = state.cardioDate;
     state.unit = loadUnit();
     if (/[?&]demo=1/.test(window.location.search)) {
       seedDemo();
+      // 示例模式下直接停在有数据的那天，否则一进来是空日子，看不出这功能
+      state.dayDate = "2026-02-10";
+      state.cardioDate = "2026-02-10";
     } else {
       state.sessions = load();
       state.weights = loadWeights();
+      state.cardio = loadCardio();
+      // 今天没记录时，默认停在最近有数据的那天，免得一打开是空屏
+      if (!L.dayView(state.sessions, state.weights, state.dayDate, state.cardio).hasData) {
+        var dates = L.dayList(state.sessions, state.weights, state.cardio);
+        if (dates.length > 0) state.dayDate = dates[0];
+      }
     }
     state.progressExercise = "卧推";
     renderAll();

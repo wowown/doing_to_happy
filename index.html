@@ -43,7 +43,7 @@
   .stat span { color: var(--muted); font-size: 11px; }
   label.field { display: block; color: var(--muted); font-size: 12.5px; margin-bottom: 6px; }
   input, select, button, textarea { font: inherit; color: inherit; }
-  input[type="date"], input[type="text"], input[type="number"], select, textarea {
+  input[type="date"], input[type="text"], input[type="number"], input[type="search"], select, textarea {
     width: 100%;
     background: var(--card-2);
     border: 1px solid var(--line);
@@ -131,6 +131,9 @@
     <div id="entries" style="margin-top: 14px;"></div>
 
     <div class="row" style="margin-top: 14px;">
+      <input type="search" id="exercise-filter" class="grow" placeholder="搜索动作，比如「推」" aria-label="搜索动作" />
+    </div>
+    <div class="row" style="margin-top: 8px;">
       <select id="exercise-select" class="grow" aria-label="选择动作"></select>
       <button id="add-exercise" class="mini">+ 加动作</button>
     </div>
@@ -143,6 +146,35 @@
     <input type="text" id="note" placeholder="比如 状态不错 / 手腕有点紧" />
 
     <button id="save" class="primary" style="width: 100%; margin-top: 14px; padding: 12px;">保存这次训练</button>
+  </section>
+
+  <!-- 有氧 -->
+  <section class="card">
+    <h2>有氧</h2>
+    <div class="row">
+      <input type="date" id="cardio-date" class="grow" aria-label="有氧日期" />
+      <select id="cardio-type" class="grow" aria-label="有氧类型"></select>
+    </div>
+    <div class="row" style="margin-top: 8px;">
+      <input type="number" id="cardio-minutes" class="grow" inputmode="numeric" min="1" step="1" placeholder="分钟" aria-label="时长（分钟）" />
+      <select id="cardio-intensity" class="grow" aria-label="强度"></select>
+      <input type="number" id="cardio-distance" class="grow" inputmode="decimal" min="0" step="0.1" placeholder="km（可选）" aria-label="距离（可选）" />
+    </div>
+    <button id="save-cardio" class="mini" style="width: 100%; margin-top: 10px;">记录这次有氧</button>
+    <div id="cardio-list" style="margin-top: 10px;"></div>
+  </section>
+
+  <!-- 某一天 -->
+  <section class="card" id="day-card">
+    <h2>某一天</h2>
+    <div class="row">
+      <button id="day-prev" class="mini" title="前一天">←</button>
+      <input type="date" id="day-date" class="grow" aria-label="查看哪一天" />
+      <button id="day-next" class="mini" title="后一天">→</button>
+      <button id="day-today" class="mini">今天</button>
+    </div>
+    <div id="day-summary" class="pr" style="margin-top: 10px;"></div>
+    <div id="day-body" style="margin-top: 10px;"></div>
   </section>
 
   <!-- 体重 -->
@@ -166,9 +198,9 @@
     <div class="pr" id="pr"></div>
   </section>
 
-  <!-- 历史 -->
+  <!-- 历史：按天分组 -->
   <section class="card">
-    <h2>历史记录</h2>
+    <h2>历史（按天）</h2>
     <div id="history"></div>
   </section>
 
